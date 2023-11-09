@@ -28,6 +28,7 @@ from datasets import get_ds_info, get_ds_trf, get_ood_trf, get_ds
 from scores import get_weight
 import torchvision.datasets as dset
 import wandb
+from datasets.imagenetUtil import *
 
 
 def calculateEntropy(posits, numberOfClasses):
@@ -95,23 +96,41 @@ def main(args):
     # setup_logger(str(exp_path), 'console.log')
     print('>>> Output dir: {}'.format(str(exp_path)))
     
-    train_trf_id = get_ds_trf(args.id, 'train')
-    train_trf_ood = get_ood_trf(args.id, args.ood, 'train')
-    test_trf = get_ds_trf(args.id, 'test')
 
-    # train_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='train', transform=train_trf_id)
-    # test_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf)
 
-    train_set_id = dset.CIFAR100('../data/cifarpy', train=True, transform=train_trf_id, download=True)
-    test_set_id = dset.CIFAR100('../data/cifarpy', train=False, transform=test_trf, download=True)
+    if args.id == 'cifar100':
+        train_trf_id = get_ds_trf(args.id, 'train')
+        train_trf_ood = get_ood_trf(args.id, args.ood, 'train')
+        test_trf = get_ds_trf(args.id, 'test')
 
-    if args.ood == 'tiny_images':
-        train_set_all_ood = get_ds(root=args.data_dir, ds_name='tiny_images', split='wo_cifar', transform=train_trf_ood)
-    elif args.ood in ['random_images','ti_300k', 'imagenet_64']:
-        train_set_all_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='train', transform=train_trf_ood)
+        # train_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='train', transform=train_trf_id)
+        # test_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf)
 
-    train_loader_id = DataLoader(train_set_id, batch_size=args.batch_size, shuffle=True, num_workers=args.prefetch, pin_memory=True, drop_last=True)
-    test_loader_id = DataLoader(test_set_id, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
+        train_set_id = dset.CIFAR100('../data/cifarpy', train=True, transform=train_trf_id, download=True)
+        test_set_id = dset.CIFAR100('../data/cifarpy', train=False, transform=test_trf, download=True)
+
+        if args.ood == 'tiny_images':
+            train_set_all_ood = get_ds(root=args.data_dir, ds_name='tiny_images', split='wo_cifar',
+                                       transform=train_trf_ood)
+        elif args.ood in ['random_images', 'ti_300k', 'imagenet_64']:
+            train_set_all_ood = get_ds(root=args.data_dir, ds_name=args.ood, split='train', transform=train_trf_ood)
+    elif args.id == "imagenet":
+        # Note that the current implementation of the imagenet dataset is not suited for calculating accuracy. This
+        # is due to the fact that we only use a subset of the classes of the imagenet dataset and as a result, the
+        # numbering of the classes and target truths gets messed up.
+        # @TODO: Fix this issue
+        num_classes = args.imagenetNumberOfClasses
+        _, _, _, _, _, train_set_id, \
+            test_set_id, _, train_set_all_ood = setup_imagenet(num_classes, rootPath="../data/imageNet")
+    else:
+        raise NotImplementedError
+
+
+
+    train_loader_id = DataLoader(train_set_id, batch_size=args.batch_size, shuffle=True,
+                                 num_workers=args.prefetch, pin_memory=True, drop_last=True)
+    test_loader_id = DataLoader(test_set_id, batch_size=args.batch_size, shuffle=False,
+                                num_workers=args.prefetch, pin_memory=True)
 
     # the candidate ood idxs
     indices_candidate_ood_epochs = []
@@ -121,7 +140,12 @@ def main(args):
         indices_candidate_ood_epochs.append(indices_epoch)
 
     print('>>> ID: {} - OOD: {}'.format(args.id, args.ood))
-    num_classes = len(get_ds_info(args.id, 'classes'))
+    if args.id == "cifar100":
+        num_classes = 100
+    elif args.id == "imagenet":
+        num_classes = args.imagenetNumberOfClasses
+    else:
+        raise ValueError("Unknown dataset {}".format(args.id))
     print('>>> CLF: {}'.format(args.arch))
     clf = get_clf(args.arch, num_classes + (1 if args.oodMethod in ["abs"] else 0))
     if args.finetune:
@@ -134,10 +158,12 @@ def main(args):
 
 
     # move CLF to gpus
-    gpu_idx = int(args.gpu_idx)
-    if torch.cuda.is_available():
-        torch.cuda.set_device(gpu_idx)
-        clf.cuda()
+
+    # if torch.cuda.is_available():
+        # gpu_idx = int(args.gpu_idx)
+        # torch.cuda.set_device(gpu_idx)
+        # clf.cuda()
+    clf = torch.nn.DataParallel(clf, device_ids=[args.gpu_idx])
     # clf.apply(weights_init)
 
     print('Optimizer: LR: {:.2f} - WD: {:.5f} - Mom: {:.2f} - Nes: True'.format(args.lr, args.weight_decay, args.momentum))
@@ -170,9 +196,9 @@ def main(args):
 
     batch_size_candidate_ood = int(args.size_candidate_ood / len(train_set_id) * args.batch_size)
     batch_size_sampled_ood = int(args.size_factor_sampled_ood * args.batch_size)
+    print(batch_size_candidate_ood, batch_size_sampled_ood, args.size_candidate_ood, len(train_set_id))
     spt, ept = args.spt, args.ept
 
-    print(spt, ept)
 
     for epoch in range(start_epoch, args.epochs+1):
 
@@ -180,15 +206,18 @@ def main(args):
         train_loader_candidate_ood = DataLoader(train_set_candidate_ood, batch_size=batch_size_candidate_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
         
         epoch_time = time.time()
-        
+        print(len(train_loader_id), len(train_loader_candidate_ood))
+        print(batch_size_candidate_ood)
         for sample_id, sample_ood in zip(train_loader_id, train_loader_candidate_ood):
             if isinstance(sample_id, list):
                 sample_id = {'data': sample_id[0], 'label': sample_id[1]}
+            if isinstance(sample_ood, list):
+                sample_ood = {'data': sample_ood[0], 'label': sample_ood[1]}
             clf.eval()
             data_batch_candidate_ood = sample_ood['data'].cuda()
 
             with torch.no_grad():
-                logits_batch_candidate_ood, feats_batch_candidate_ood = clf(data_batch_candidate_ood, ret_feat=True)
+                logits_batch_candidate_ood, feats_batch_candidate_ood = clf.module.forward(data_batch_candidate_ood, ret_feat=True)
             # print(logits_batch_candidate_ood.shape)
             # pdb.set_trace()
             # prob_id = torch.softmax(logits_batch_id, dim=1)
@@ -262,6 +291,7 @@ def main(args):
             finalBatchSize = batch_size_sampled_ood * (2 if args.sampleTwoWay else 1)
             # fill the empty: remove the already sampled, then randomly complete the sampled
             if finalBatchSize > len(idxs_sampled):
+                print(len(idxs_sampled), len(idxs_sorted))
                 idxs_sampled.extend(random.sample(list(set(idxs_sorted[spt:ept]) - set(idxs_sampled)), k=finalBatchSize - len(idxs_sampled)))
             # indices_sampled_ood = indices_candidate_ood[idxs_sampled]
             data_ood = data_batch_candidate_ood[idxs_sampled]
@@ -392,7 +422,7 @@ def main(args):
             torch.save({
                 'epoch': epoch,
                 'arch': args.arch,
-                'state_dict': copy.deepcopy(clf.state_dict()),
+                'state_dict': copy.deepcopy(clf.module.state_dict()),
                 'optimizer': copy.deepcopy(optimizer.state_dict()),
                 'scheduler': copy.deepcopy(scheduler.state_dict()),
                 'cla_acc': cla_acc
@@ -401,7 +431,7 @@ def main(args):
     torch.save({
         'epoch': epoch,
         'arch': args.arch,
-        'state_dict': copy.deepcopy(clf.state_dict()),
+        'state_dict': copy.deepcopy(clf.module.state_dict()),
         'optimizer': copy.deepcopy(optimizer.state_dict()),
         'scheduler': copy.deepcopy(scheduler.state_dict()),
         'cla_acc': cla_acc
@@ -417,7 +447,8 @@ if __name__ == '__main__':
     parser.add_argument('--ood', type=str, default='random_images', choices=['tiny_images', 'random_images', 'imagenet_64'])
     parser.add_argument('--beta', type=float, default=1.0)
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='tuning')
-    parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40_2', 'wrn40_4'])
+    parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40_2',
+                                                                            'wrn40_4', "resnet50", 'resnet101'])
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--scheduler', type=str, default='multistep', choices=['lambda', 'multistep'])
@@ -436,7 +467,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_cluster', type=int, default=64) # 192: 24(8) -> 64: 8
     parser.add_argument('--n_init', type=int, default=3)
     parser.add_argument('--prefetch', type=int, default=4, help='number of dataloader workers')
-    parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=0)
+    parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=[0], nargs='+')
     parser.add_argument("--finetune", help="fine tune", action="store_true")
     parser.add_argument("--pretrainFile", help="checkpoint location", type=str, default=None)
 
@@ -450,6 +481,13 @@ if __name__ == '__main__':
                         help='margin for out-distribution; below this value will be penalized')
     parser.add_argument('--sampleTwoWay', help='Sample both the worst and best points from each cluster',
                         action="store_true")
+    parser.add_argument('--imagenetNumberOfClasses', type=int, default=100)
+
     args = parser.parse_args()
     args.num_cluster = min(args.num_cluster, args.batch_size)
+    assert args.imagenetNumberOfClasses <= 500
+
+    if args.id == "imagenet":
+        args.size_candidate_ood = 1000 * args.imagenetNumberOfClasses
+    assert args.size_candidate_ood
     main(args)

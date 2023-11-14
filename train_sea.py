@@ -29,6 +29,7 @@ from scores import get_weight
 import torchvision.datasets as dset
 import wandb
 from datasets.imagenetUtil import *
+from tqdm import tqdm
 
 
 def calculateEntropy(posits, numberOfClasses):
@@ -80,6 +81,7 @@ def cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
 
 def main(args):
+    device = torch.device("cpu")
     wandb.init(project="DOS-OOD", entity="limitlessinfinite", config=args)
     timeIdentifier = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M")
     init_seeds(args.seed)
@@ -98,7 +100,7 @@ def main(args):
     
 
 
-    if args.id == 'cifar100':
+    if args.id.startswith("cifar"):
         train_trf_id = get_ds_trf(args.id, 'train')
         train_trf_ood = get_ood_trf(args.id, args.ood, 'train')
         test_trf = get_ds_trf(args.id, 'test')
@@ -106,8 +108,12 @@ def main(args):
         # train_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='train', transform=train_trf_id)
         # test_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf)
 
-        train_set_id = dset.CIFAR100('../data/cifarpy', train=True, transform=train_trf_id, download=True)
-        test_set_id = dset.CIFAR100('../data/cifarpy', train=False, transform=test_trf, download=True)
+        if args.id == "cifar10":
+            train_set_id = dset.CIFAR10('../data/cifarpy', train=True, transform=train_trf_id, download=True)
+            test_set_id = dset.CIFAR10('../data/cifarpy', train=False, transform=test_trf, download=True)
+        elif args.id == "cifar100":
+            train_set_id = dset.CIFAR100('../data/cifarpy', train=True, transform=train_trf_id, download=True)
+            test_set_id = dset.CIFAR100('../data/cifarpy', train=False, transform=test_trf, download=True)
 
         if args.ood == 'tiny_images':
             train_set_all_ood = get_ds(root=args.data_dir, ds_name='tiny_images', split='wo_cifar',
@@ -126,21 +132,35 @@ def main(args):
         raise NotImplementedError
 
 
-
+    print("Creating data loaders...")
     train_loader_id = DataLoader(train_set_id, batch_size=args.batch_size, shuffle=True,
                                  num_workers=args.prefetch, pin_memory=True, drop_last=True)
     test_loader_id = DataLoader(test_set_id, batch_size=args.batch_size, shuffle=False,
                                 num_workers=args.prefetch, pin_memory=True)
 
+    if args.oodMethod == "energy":
+        trainValSplit = 0.97
+        lengths = [int(trainValSplit * len(train_set_all_ood))]
+        lengths.append(len(train_set_all_ood) - lengths[0])
+        train_set_all_ood, val_set_ood =\
+            torch.utils.data.random_split(train_set_all_ood, lengths)
+        print(len(train_set_all_ood), len(val_set_ood))
+        valDataLoader = DataLoader(val_set_ood, batch_size=args.batch_size, shuffle=True,
+                                   num_workers=args.prefetch, pin_memory=True)
+        validationEnergies = []
+        bestValidationEnergy = -float("inf")
     # the candidate ood idxs
     indices_candidate_ood_epochs = []
 
+    args.size_candidate_ood = min(args.size_candidate_ood, len(train_set_all_ood))
     for i in range(args.epochs):
         indices_epoch = np.array(random.sample(range(len(train_set_all_ood)), args.size_candidate_ood))
         indices_candidate_ood_epochs.append(indices_epoch)
 
     print('>>> ID: {} - OOD: {}'.format(args.id, args.ood))
-    if args.id == "cifar100":
+    if args.id == "cifar10":
+        num_classes = 10
+    elif args.id == "cifar100":
         num_classes = 100
     elif args.id == "imagenet":
         num_classes = args.imagenetNumberOfClasses
@@ -163,11 +183,19 @@ def main(args):
         # gpu_idx = int(args.gpu_idx)
         # torch.cuda.set_device(gpu_idx)
         # clf.cuda()
-    clf = torch.nn.DataParallel(clf, device_ids=[args.gpu_idx])
+    onGpu = True
+    if args.gpu_idx[0] == -1:
+        onGpu = False
+    else:
+        clf = torch.nn.DataParallel(clf, device_ids=args.gpu_idx)
+        clf = clf.cuda()
     # clf.apply(weights_init)
 
     print('Optimizer: LR: {:.2f} - WD: {:.5f} - Mom: {:.2f} - Nes: True'.format(args.lr, args.weight_decay, args.momentum))
-    lr_stones = [int(args.epochs * float(lr_stone)) for lr_stone in args.lr_stones]
+    if args.singleLrStone:
+        lr_stones = [args.singleLrStone]
+    else:
+        lr_stones = [int(args.epochs * float(lr_stone)) for lr_stone in args.lr_stones]
     optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
     
     # print('Scheduler: MultiStepLR - LMS: {}'.format(args.lr_stones))
@@ -196,28 +224,42 @@ def main(args):
 
     batch_size_candidate_ood = int(args.size_candidate_ood / len(train_set_id) * args.batch_size)
     batch_size_sampled_ood = int(args.size_factor_sampled_ood * args.batch_size)
-    print(batch_size_candidate_ood, batch_size_sampled_ood, args.size_candidate_ood, len(train_set_id))
+    # print(batch_size_candidate_ood, batch_size_sampled_ood, args.size_candidate_ood, len(train_set_id))
     spt, ept = args.spt, args.ept
+
 
 
     for epoch in range(start_epoch, args.epochs+1):
 
         train_set_candidate_ood = Subset(train_set_all_ood, indices_candidate_ood_epochs[epoch - 1])
         train_loader_candidate_ood = DataLoader(train_set_candidate_ood, batch_size=batch_size_candidate_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
-        
+        print("batch_size_candidate_ood: ", batch_size_candidate_ood)
         epoch_time = time.time()
-        print(len(train_loader_id), len(train_loader_candidate_ood))
-        print(batch_size_candidate_ood)
-        for sample_id, sample_ood in zip(train_loader_id, train_loader_candidate_ood):
+
+
+        for sample_id, sample_ood in tqdm(zip(train_loader_id, train_loader_candidate_ood),
+                                          total=min(len(train_loader_id), len(train_loader_candidate_ood))):
             if isinstance(sample_id, list):
                 sample_id = {'data': sample_id[0], 'label': sample_id[1]}
             if isinstance(sample_ood, list):
                 sample_ood = {'data': sample_ood[0], 'label': sample_ood[1]}
+            data_id = sample_id['data']
+            target_id = sample_id['label']
+            data_batch_candidate_ood = sample_ood['data']
+            if onGpu:
+                data_id = data_id.cuda()
+                target_id = target_id.cuda()
+                data_batch_candidate_ood = data_batch_candidate_ood.cuda()
             clf.eval()
-            data_batch_candidate_ood = sample_ood['data'].cuda()
 
+            # data_batch_candidate_ood = sample_ood['data']
+            # print("Calculating features")
             with torch.no_grad():
-                logits_batch_candidate_ood, feats_batch_candidate_ood = clf.module.forward(data_batch_candidate_ood, ret_feat=True)
+                if onGpu:
+                    logits_batch_candidate_ood, feats_batch_candidate_ood = clf.module.forward(data_batch_candidate_ood, ret_feat=True)
+                else:
+                    logits_batch_candidate_ood, feats_batch_candidate_ood = clf.forward(data_batch_candidate_ood,
+                                                                                               ret_feat=True)
             # print(logits_batch_candidate_ood.shape)
             # pdb.set_trace()
             # prob_id = torch.softmax(logits_batch_id, dim=1)
@@ -236,7 +278,7 @@ def main(args):
             else:
                 raise NotImplementedError
             idxs_sorted = np.argsort(weights_batch_candidate_ood)
-
+            # print("Sorting ...")
             weights_batch_proximial_ood = weights_batch_candidate_ood[list(idxs_sorted[spt:ept])]
 
             # diff representations: latent embedding, normalized latent embedding, output prob
@@ -262,11 +304,13 @@ def main(args):
 
             # clustering the N proximial points into K clusters with KMeans algorithm
             k = args.num_cluster
+            # print("Clustering ...")
             kmeans = KMeans(n_clusters=args.num_cluster, n_init=args.n_init).fit(repr_batch_proximial_ood)
+
             clus_proximial_ood = kmeans.labels_
 
             idxs_sampled = []
-
+            # print("Sampling ...")
             # --- kmeans - sub-cluster ---
             if k > batch_size_sampled_ood:
                 sampled_cluster_size = 1
@@ -288,30 +332,36 @@ def main(args):
 
 
                     idxs_sampled.extend(toAdd)
+
             finalBatchSize = batch_size_sampled_ood * (2 if args.sampleTwoWay else 1)
             # fill the empty: remove the already sampled, then randomly complete the sampled
             if finalBatchSize > len(idxs_sampled):
-                print(len(idxs_sampled), len(idxs_sorted))
                 idxs_sampled.extend(random.sample(list(set(idxs_sorted[spt:ept]) - set(idxs_sampled)), k=finalBatchSize - len(idxs_sampled)))
             # indices_sampled_ood = indices_candidate_ood[idxs_sampled]
+            # pdb.set_trace()
             data_ood = data_batch_candidate_ood[idxs_sampled]
 
             # greedy_count += len(set(idxs_sampled) & set(idxs_sorted[:batch_size_sampled_ood]))
             # calculate metric and visulization
-            feats_batch_candidate_ood = np.array(feats_batch_candidate_ood.cpu())
+            # feats_batch_candidate_ood = np.array(feats_batch_candidate_ood.cpu())
             
-            num_classes = len(train_loader_id.dataset.classes)
+            # num_classes = len(train_loader_id.dataset.classes)
             clf.train()
-
+            # print("Training ...")
             total, correct, total_loss = 0, 0, 0.0
 
             num_id = sample_id['data'].size(0)
             num_ood = data_ood.size(0)
 
-            data_id = sample_id['data'].cuda()
+            # print(sample_id['data'])
+
+            # data_id = sample_id['data']
             data = torch.cat([data_id, data_ood], dim=0)
-            target_id = sample_id['label'].cuda()
-            target_ood = (torch.ones(num_ood) * num_classes).long().cuda()
+            target_ood = (torch.ones(num_ood) * num_classes).long()
+            if onGpu:
+                target_ood = target_ood.cuda()
+            # target_id = sample_id['label']
+            # target_ood = (torch.ones(num_ood) * num_classes).long()
 
             def jacobianLossFunction(inputs):
                 if args.oodMethod == "abs":
@@ -338,6 +388,10 @@ def main(args):
                 else:
                     raise NotImplementedError
             # forward
+
+
+
+
             logit = clf(data)
             ceInd = F.cross_entropy(logit[:num_id], target_id)
             loss = ceInd
@@ -398,6 +452,8 @@ def main(args):
                 correct += pred.eq(target_id).sum().item()
                 total += num_id
 
+
+
         if args.scheduler == 'multistep':
             scheduler.step()
         
@@ -406,7 +462,42 @@ def main(args):
         
         # average on sample
         print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(train_loader_id), 100. * correct / total))
-        
+
+        # --------------------------------------------------------------------- #
+        if args.oodMethod == "energy":
+            print("Validating ...")
+            clf.eval()
+            energies = []
+            with torch.no_grad():
+                for x in tqdm(valDataLoader):
+                    if args.id == "imagenet":
+                        x = x[0]
+                    else:
+                        x = x['data']
+                    logit = clf(x)
+                    energy = -torch.logsumexp(logit, 1)
+                    energies.append(energy.cpu().numpy())
+                energies = np.concatenate(energies)
+                validationEnergy = np.mean(energies)
+                validationEnergies.append(validationEnergy)
+                wandb.log({"Validation Energy": validationEnergy})
+                if validationEnergy > bestValidationEnergy:
+                    bestValidationEnergy = validationEnergy
+                    torch.save({'state_dict': clf.module.state_dict()}, str(exp_path / 'bestLoss.pth'))
+
+                if len(validationEnergies) > 50 and (np.mean(validationEnergies[-5:]) < np.mean(validationEnergies[-10:-5])):
+                    print("Early Stopping Condition Met")
+                    wandb.log({"Early Stopping Condition": 1})
+                    if args.earlyStopping:
+                        break
+                else:
+                    wandb.log({"Early Stopping Condition": 0})
+
+
+
+
+
+
         val_metrics = test(test_loader_id, clf, num_classes)
         cla_acc = val_metrics['cla_acc']
 
@@ -418,7 +509,7 @@ def main(args):
             flush=True
         )
 
-        if epoch % args.save_freq == 0 or epoch >= 90:
+        if epoch % args.save_freq == 0:
             torch.save({
                 'epoch': epoch,
                 'arch': args.arch,
@@ -448,15 +539,17 @@ if __name__ == '__main__':
     parser.add_argument('--beta', type=float, default=1.0)
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='tuning')
     parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40_2',
-                                                                            'wrn40_4', "resnet50", 'resnet101'])
+                                                                            'wrn40_4', "resnet50", 'resnet101',
+                                                                            "resnet18"])
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--scheduler', type=str, default='multistep', choices=['lambda', 'multistep'])
+    parser.add_argument('--singleLrStone', type=int, default=0)
     parser.add_argument('--lr_stones', nargs='+', default=[0.5, 0.75, 0.9])
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--print_freq', type=int, default=101)
-    parser.add_argument('--save_freq', type=int, default=1)
+    parser.add_argument('--save_freq', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=2 ** 6) # 64
     parser.add_argument('--size_candidate_ood', type=int, default=300000)
     parser.add_argument('--size_factor_sampled_ood', type=int, default=1)
@@ -482,12 +575,14 @@ if __name__ == '__main__':
     parser.add_argument('--sampleTwoWay', help='Sample both the worst and best points from each cluster',
                         action="store_true")
     parser.add_argument('--imagenetNumberOfClasses', type=int, default=100)
+    parser.add_argument('--earlyStopping', help='Early stopping', action="store_true")
 
     args = parser.parse_args()
+
     args.num_cluster = min(args.num_cluster, args.batch_size)
     assert args.imagenetNumberOfClasses <= 500
 
-    if args.id == "imagenet":
-        args.size_candidate_ood = 1000 * args.imagenetNumberOfClasses
-    assert args.size_candidate_ood
+    # if args.id == "imagenet":
+    #     args.size_candidate_ood = 1000 * args.imagenetNumberOfClasses
+    # assert args.size_candidate_ood
     main(args)

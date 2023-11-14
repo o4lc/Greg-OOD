@@ -24,6 +24,10 @@ from models import get_clf
 import sklearn.metrics as sk
 from datasets import get_ds_info, get_ds_trf, get_ood_trf, get_ds
 import torchvision.datasets as dset
+from datasets.imagenetUtil import *
+from torchvision import transforms
+import torchvision
+from tqdm import tqdm
 
 
 
@@ -144,7 +148,7 @@ def get_abs_score(data_loader, clf):
     abs_score = []
     feat_norm = []
 
-    for sample in data_loader:
+    for sample in tqdm(data_loader):
         # data = sample['data'].cuda()
         data = sample[0].cuda()
 
@@ -284,7 +288,7 @@ def get_energy_score(data_loader, clf, temperature=1.0):
     
     energy_score = []
 
-    for sample in data_loader:
+    for sample in tqdm(data_loader):
         # data = sample['data'].cuda()
         data = sample[0].cuda()
         with torch.no_grad():
@@ -415,85 +419,141 @@ def get_measures(examples, labels, recall_level=0.95):
 
 
 def main(args):
+    if args.id != "imagenet":
+        _, std = get_ds_info(args.id, 'mean_and_std')
 
-    _, std = get_ds_info(args.id, 'mean_and_std')
-    test_trf_id = get_ds_trf(args.id, 'test')
     # test_set_id = get_ds(root=args.data_dir, ds_name=args.id, split='test', transform=test_trf_id)
     # test_loader_id = DataLoader(test_set_id, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch, pin_memory=True)
 
-    test_set_id = dset.CIFAR100('../data/cifarpy', train=False, transform=test_trf_id, download=True)
+    if args.id.startswith("cifa"):
+        test_trf_id = get_ds_trf(args.id, 'test')
+        if args.id == "cifar100":
+            num_classes = 100
+            test_set_id = dset.CIFAR100('../data/cifarpy', train=False, transform=test_trf_id, download=True)
+        elif args.id == "cifar10":
+            num_classes = 10
+            test_set_id = dset.CIFAR10('../data/cifarpy', train=False, transform=test_trf_id, download=True)
+    elif args.id == "imagenet":
+        num_classes = 100
+        _, _, _, transform_test_largescale, _, train_set_id, \
+            test_set_id, _, train_set_all_ood = setup_imagenet(num_classes, rootPath="../data/imageNet",
+                                                               validationOnly=True)
+    else:
+        raise NotImplementedError
     test_loader_id = DataLoader(test_set_id, batch_size=args.batch_size, shuffle=False, num_workers=args.prefetch,
                                 pin_memory=True)
     test_loader_oods = []
     ### datasets:
     ood_names = []
     args.test_bs = args.batch_size
-    ood_names.append("dtd")
-    ood_data = dset.ImageFolder(root="../data/dtd/images",
-                                transform=get_ood_trf(args.id, 'dtd', 'test'))
-    ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                             num_workers=4, pin_memory=False)
-    test_loader_oods.append(ood_loader)
 
-    # /////////////// SVHN /////////////// # cropped and no sampling of the test set
-    ood_names.append("svhn")
-    ood_data = SVHN(root='../data/svhn/', split="test",
-                         transform=get_ood_trf(args.id, 'svhn', 'test'), download=False)
-    ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                             num_workers=4, pin_memory=False)
-    test_loader_oods.append(ood_loader)
 
-    # # /////////////// Places365 ///////////////
-    # ood_data = dset.ImageFolder(root="../../data/places365/",
-    #                             transform=trn.Compose([trn.Resize(32), trn.CenterCrop(32),
-    #                                                    trn.ToTensor(), trn.Normalize(mean, std)]))
-    # ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-    #                                          num_workers=2, pin_memory=True)
-    # print('\n\nPlaces365 Detection')
-    # get_and_print_results(ood_loader)
-    # /////////////// Places365 ///////////////
-    ood_names.append("places365_10k")
-    ood_data = dset.ImageFolder(root="../data/test_256/",
-                                transform=get_ood_trf(args.id, 'places365_10k', 'test'))
-    ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                             num_workers=4, pin_memory=False)
-    test_loader_oods.append(ood_loader)
+    if args.id.startswith("cifar"):
+        ood_names.append("dtd")
+        ood_data = dset.ImageFolder(root="../data/dtd/images",
+                                    transform=get_ood_trf(args.id, 'dtd', 'test'))
+        ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+                                                 num_workers=4, pin_memory=False)
+        test_loader_oods.append(ood_loader)
+        # /////////////// SVHN /////////////// # cropped and no sampling of the test set
+        ood_names.append("svhn")
+        ood_data = SVHN(root='../data/svhn/', split="test",
+                             transform=get_ood_trf(args.id, 'svhn', 'test'), download=False)
+        ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+                                                 num_workers=4, pin_memory=False)
+        test_loader_oods.append(ood_loader)
 
-    # # /////////////// SUN ///////////////
-    # ood_data = dset.ImageFolder(root="../../data/SUN",
-    #                             transform=trn.Compose([trn.Resize(32), trn.CenterCrop(32),
-    #                                                    trn.ToTensor(), trn.Normalize(mean, std)]))
-    # ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-    #                                          num_workers=1, pin_memory=True)
-    # print('\n\nSUN Detection')
-    # get_and_print_results(ood_loader)
+        # # /////////////// Places365 ///////////////
+        # ood_data = dset.ImageFolder(root="../../data/places365/",
+        #                             transform=trn.Compose([trn.Resize(32), trn.CenterCrop(32),
+        #                                                    trn.ToTensor(), trn.Normalize(mean, std)]))
+        # ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+        #                                          num_workers=2, pin_memory=True)
+        # print('\n\nPlaces365 Detection')
+        # get_and_print_results(ood_loader)
+        # /////////////// Places365 ///////////////
+        ood_names.append("places365_10k")
+        ood_data = dset.ImageFolder(root="../data/test_256/",
+                                    transform=get_ood_trf(args.id, 'places365_10k', 'test'))
+        ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+                                                 num_workers=4, pin_memory=False)
+        test_loader_oods.append(ood_loader)
 
-    # /////////////// LSUN-C ///////////////
-    ood_names.append("lsunc")
-    ood_data = dset.ImageFolder(root="../data/LSUN",
-                                transform=get_ood_trf(args.id, 'lsunc', 'test'))
-    ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                             num_workers=4, pin_memory=False)
-    test_loader_oods.append(ood_loader)
+        # # /////////////// SUN ///////////////
+        # ood_data = dset.ImageFolder(root="../../data/SUN",
+        #                             transform=trn.Compose([trn.Resize(32), trn.CenterCrop(32),
+        #                                                    trn.ToTensor(), trn.Normalize(mean, std)]))
+        # ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+        #                                          num_workers=1, pin_memory=True)
+        # print('\n\nSUN Detection')
+        # get_and_print_results(ood_loader)
 
-    # # /////////////// LSUN-R ///////////////
-    ood_names.append("lsunr")
-    ood_data = dset.ImageFolder(root="../data/LSUN_resize",
-                                transform=get_ood_trf(args.id, 'lsunr', 'test'))
-    ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                             num_workers=4, pin_memory=False)
-    test_loader_oods.append(ood_loader)
+        # /////////////// LSUN-C ///////////////
+        ood_names.append("lsunc")
+        ood_data = dset.ImageFolder(root="../data/LSUN",
+                                    transform=get_ood_trf(args.id, 'lsunc', 'test'))
+        ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+                                                 num_workers=4, pin_memory=False)
+        test_loader_oods.append(ood_loader)
 
-    # # /////////////// iSUN ///////////////
-    ood_names.append("isun")
-    ood_data = dset.ImageFolder(root="../data/iSUN/",
-                                transform=get_ood_trf(args.id, 'isun', 'test'))
-    ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                             num_workers=4, pin_memory=False)
-    test_loader_oods.append(ood_loader)
+        # # /////////////// LSUN-R ///////////////
+        ood_names.append("lsunr")
+        ood_data = dset.ImageFolder(root="../data/LSUN_resize",
+                                    transform=get_ood_trf(args.id, 'lsunr', 'test'))
+        ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+                                                 num_workers=4, pin_memory=False)
+        test_loader_oods.append(ood_loader)
+
+        # # /////////////// iSUN ///////////////
+        ood_names.append("isun")
+        ood_data = dset.ImageFolder(root="../data/iSUN/",
+                                    transform=get_ood_trf(args.id, 'isun', 'test'))
+        ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+                                                 num_workers=4, pin_memory=False)
+        test_loader_oods.append(ood_loader)
+    elif args.id == "imagenet":
+        # transform_test_largescale = transforms.Compose([
+        #     transforms.Resize(256),
+        #     transforms.CenterCrop(224),
+        #     transforms.ToTensor(),
+        #     # transforms.Normalize(mean=[0.485, 0.456, 0.406],
+        #     #                      std=[0.229, 0.224, 0.225]),
+        # ])
+
+        ood_names.append("dtd")
+        ood_data = dset.ImageFolder(root="../data/dtd/images",
+                                    transform=transform_test_largescale)
+        ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+                                                 num_workers=4, pin_memory=False)
+        test_loader_oods.append(ood_loader)
+
+        ood_names.append("Places")
+        ood_data = dset.ImageFolder(root="../data/Places/",
+                                    transform=transform_test_largescale)
+        ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+                                                 num_workers=6, pin_memory=False)
+        test_loader_oods.append(ood_loader)
+
+        ood_names.append("iNat")
+        ood_loader = torch.utils.data.DataLoader(
+            torchvision.datasets.ImageFolder("../data/iNaturalist", transform=transform_test_largescale),
+            batch_size=args.test_bs, shuffle=False, pin_memory=True, num_workers=4)
+        test_loader_oods.append(ood_loader)
+
+        ood_names.append("SUN")
+        ood_loader = torch.utils.data.DataLoader(
+            torchvision.datasets.ImageFolder("../data/SUN", transform=transform_test_largescale), batch_size=args.test_bs,
+            shuffle=False, pin_memory=True, num_workers=4)
+        test_loader_oods.append(ood_loader)
+
+    else:
+        raise ValueError("Invalid dataset name.")
+
+
+
 
     # load CLF
-    num_classes = len(get_ds_info(args.id, 'classes'))
+
     if args.score == 'abs':
         clf = get_clf(args.arch, num_classes+1)
     elif args.score in ['maha', 'logit', 'energy', 'msp', 'odin', 'entropy']:
@@ -506,8 +566,12 @@ def main(args):
 
     if clf_path.is_file():
         clf_state = torch.load(str(clf_path), map_location='cuda:0')
+        newDictionary = {}
+        for k in clf_state['state_dict'].keys():
+            newDictionary[k.replace('module.', '').replace('resnet.', '')] = clf_state['state_dict'][k]
         # cla_acc = clf_state['cla_acc']
-        clf.load_state_dict(clf_state['state_dict'])
+
+        clf.load_state_dict(newDictionary)
         # print('>>> load classifier from {} (classification acc {:.4f}%)'.format(str(clf_path), cla_acc))
     else:
         raise RuntimeError('<--- invlaid classifier path: {}'.format(str(clf_path)))
@@ -639,14 +703,14 @@ if __name__ == '__main__':
     parser.add_argument('--seed', default=42, type=int, help='seed for initialize detection')
     parser.add_argument('--data_dir', type=str, default='../data')
     parser.add_argument('--id', type=str, default='cifar100')
-    parser.add_argument('--oods', nargs='+', default=['svhn', 'lsunc', 'dtd', 'places365_10k', 'lsunr', 'isun'])
+    # parser.add_argument('--oods', nargs='+', default=['svhn', 'lsunc', 'dtd', 'places365_10k', 'lsunr', 'isun'])
     parser.add_argument('--score', type=str, default='msp', choices=['msp', 'odin', 'abs', 'logit', 'maha', 'energy', 'entropy'])
     parser.add_argument('--temperature', type=int, default=1000)
     parser.add_argument('--magnitude', type=float, default=0.0014)
     parser.add_argument('--batch_size', type=int, default=200)
     parser.add_argument('--prefetch', type=int, default=10)
     parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40_2',
-                                                                            'wrn40_4', 'resnet50', 'resnet101'])
+                                                                            'wrn40_4', 'resnet50', 'resnet101', 'resnet18'])
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
     parser.add_argument('--fig_name', type=str, default='test.png')
     parser.add_argument('--gpu_idx', type=int, default=0)

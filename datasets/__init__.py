@@ -91,7 +91,11 @@ def get_ds(root, ds_name, split, transform, target_transform=None):
 
 
 def get_ood_trf(ds_name_id, ds_name_ood, stage):
-    mean, std = get_ds_info(ds_name_id, 'mean_and_std')
+    if ds_name_id != "imagenet":
+        mean, std = get_ds_info(ds_name_id, 'mean_and_std')
+    else:
+        mean = [0, 0, 0]
+        std = [1, 1, 1]
 
     if stage == 'train':
         ood_trf = {
@@ -114,8 +118,15 @@ def get_ood_trf(ds_name_id, ds_name_ood, stage):
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize(mean, std)
-            ]
+            ],
+            'imagenet': [
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            # normalize,
+        ]
         }
+
     elif stage == 'test':
         ood_trf = {
             'svhn': [transforms.ToTensor(), transforms.Normalize(mean, std)],
@@ -134,6 +145,12 @@ def get_ood_trf(ds_name_id, ds_name_ood, stage):
             'ti_300k': [transforms.ToTensor(), transforms.Normalize(mean, std)],
             'random_images': [transforms.ToTensor(), transforms.Normalize(mean, std)],
             # 'imagenet_64': [transforms.Resize(32), transforms.CenterCrop(32), transforms.ToTensor(), transforms.Normalize(mean, std)]
+            'imagenet': [
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            # normalize,
+            ]
         }
     else:
         raise Exception('---> Dataset Stage: {} invalid'.format(stage))

@@ -434,7 +434,7 @@ def main(args):
             num_classes = 10
             test_set_id = dset.CIFAR10('../data/cifarpy', train=False, transform=test_trf_id, download=True)
     elif args.id == "imagenet":
-        num_classes = 100
+        num_classes = args.imagenetNumberOfClasses
         _, _, _, transform_test_largescale, _, train_set_id, \
             test_set_id, _, train_set_all_ood = setup_imagenet(num_classes, rootPath="../data/imageNet",
                                                                validationOnly=True)
@@ -714,6 +714,7 @@ if __name__ == '__main__':
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
     parser.add_argument('--fig_name', type=str, default='test.png')
     parser.add_argument('--gpu_idx', type=int, default=0)
+    parser.add_argument("--imagenetNumberOfClasses", type=int, default=10)
 
     args = parser.parse_args()
 

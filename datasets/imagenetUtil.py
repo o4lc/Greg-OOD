@@ -33,9 +33,13 @@ def setup_imagenet(num_class, rootPath, validationOnly=False):
 
     val_dataset = dataset.ImageNet(test_dir, 'val', transform=transform_test)
 
-    if num_class == 100:
+    if num_class in [10, 100]:
         print("Changing indices ...")
-        classToIndex = torch.load("imagenetIdClassAndIndex.pth")
+        if num_class == 100:
+            fileName = "imagenetIdClassAndIndex.pth"
+        elif num_class == 10:
+            fileName = "imagenetIdClassAndIndex10.pth"
+        classToIndex = torch.load(fileName)
         if not validationOnly:
             train_dataset = cleanDataset(train_dataset, classToIndex, onlyPermute=True)
         val_dataset = cleanDataset(val_dataset, classToIndex, onlyPermute=False)
@@ -48,7 +52,8 @@ def setup_imagenet(num_class, rootPath, validationOnly=False):
         class_index_ood = None
         train_dataset_ood = None
     else:
-        class_index_ood = list(range(num_class, 7 *num_class))
+        class_index_ood = list(range(num_class, 700))
+        # class_index_ood = list(range(num_class))
         train_dataset_ood = ImageFolder(train_dir, transform_train, index=class_index_ood)
         print("Warning. Due to the changes that are made here, the wnid to idx mapping is not correct anymore.")
     return crop_size, val_size, transform_train, transform_test, class_index, train_dataset, \

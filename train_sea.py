@@ -217,11 +217,26 @@ def main(args):
         )
     else:
         raise RuntimeError('<<< Invalid scheduler: {}'.format(args.scheduler))
-    
-    begin_time = time.time()
-    start_epoch = 1
-    cla_acc = 0.0
 
+    if args.resume:
+        print("Loading checkpoint to resume")
+        checkpoint = torch.load(args.resumeCheckpoint, map_location=torch.device('cpu'))
+        stateDictionary = checkpoint['state_dict']
+        newDictionary = {}
+        for k, v in stateDictionary.items():
+            if k.startswith("module."):
+                newDictionary[k] = v
+            else:
+                newDictionary["module." + k] = v
+        clf.load_state_dict(newDictionary)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        scheduler.load_state_dict(checkpoint['scheduler'])
+        start_epoch = checkpoint['epoch'] + 1
+        cla_acc = checkpoint['cla_acc']
+    else:
+        start_epoch = 1
+        cla_acc = 0.0
+    begin_time = time.time()
     batch_size_candidate_ood = int(args.size_candidate_ood / len(train_set_id) * args.batch_size)
     batch_size_sampled_ood = int(args.size_factor_sampled_ood * args.batch_size)
     # print(batch_size_candidate_ood, batch_size_sampled_ood, args.size_candidate_ood, len(train_set_id))
@@ -232,7 +247,8 @@ def main(args):
     for epoch in range(start_epoch, args.epochs+1):
 
         train_set_candidate_ood = Subset(train_set_all_ood, indices_candidate_ood_epochs[epoch - 1])
-        train_loader_candidate_ood = DataLoader(train_set_candidate_ood, batch_size=batch_size_candidate_ood, shuffle=False, num_workers=args.prefetch, pin_memory=True)
+        train_loader_candidate_ood = DataLoader(train_set_candidate_ood, batch_size=batch_size_candidate_ood,
+                                                shuffle=False, num_workers=args.prefetch, pin_memory=False)
         print("batch_size_candidate_ood: ", batch_size_candidate_ood)
         epoch_time = time.time()
 
@@ -256,10 +272,11 @@ def main(args):
             # print("Calculating features")
             with torch.no_grad():
                 if onGpu:
-                    logits_batch_candidate_ood, feats_batch_candidate_ood = clf.module.forward(data_batch_candidate_ood, ret_feat=True)
+                    logits_batch_candidate_ood, feats_batch_candidate_ood = clf.module.forward(
+                        data_batch_candidate_ood, ret_feat=True)
                 else:
-                    logits_batch_candidate_ood, feats_batch_candidate_ood = clf.forward(data_batch_candidate_ood,
-                                                                                               ret_feat=True)
+                    logits_batch_candidate_ood, feats_batch_candidate_ood = clf.forward(
+                        data_batch_candidate_ood, ret_feat=True)
             # print(logits_batch_candidate_ood.shape)
             # pdb.set_trace()
             # prob_id = torch.softmax(logits_batch_id, dim=1)
@@ -288,6 +305,11 @@ def main(args):
                 repr_batch_proximial_ood = feats_batch_proximial_ood
             elif args.repr == 'norm':
                 repr_batch_proximial_ood = np.array(F.normalize(feats_batch_candidate_ood.cpu(), dim=-1))[list(idxs_sorted[spt:ept])]
+            elif args.repr == 'normBatch':
+                repr_batch_proximial_ood \
+                    = (feats_batch_candidate_ood / torch.linalg.norm(feats_batch_candidate_ood, dim=1).mean())[list(idxs_sorted[spt:ept])].cpu().numpy()
+            elif args.repr == 'normFeature':
+                repr_batch_proximial_ood = np.array(F.normalize(feats_batch_candidate_ood.cpu(), dim=0))[list(idxs_sorted[spt:ept])]
             elif args.repr == 'output':
                 repr_batch_proximial_ood = np.array(torch.softmax(logits_batch_candidate_ood[:, :-1], dim=1).tolist())[list(idxs_sorted[spt:ept])]
             elif args.repr == 'pca':
@@ -553,7 +575,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=2 ** 6) # 64
     parser.add_argument('--size_candidate_ood', type=int, default=300000)
     parser.add_argument('--size_factor_sampled_ood', type=int, default=1)
-    parser.add_argument('--repr', type=str, default='norm', choices=['latent', 'norm', 'output', 'pca', 'np'])
+    parser.add_argument('--repr', type=str, default='norm', choices=['latent', 'norm', 'output', 'pca',
+                                                                     'np', 'normBatch', 'normFeature'])
     parser.add_argument('--mc', type=int, default=64, help='main components of PCA')
     parser.add_argument('--spt', type=int, default=16)
     parser.add_argument('--ept', type=int, default=384) # 368 352
@@ -563,6 +586,8 @@ if __name__ == '__main__':
     parser.add_argument('--gpu_idx', help='used gpu idx', type=int, default=[0], nargs='+')
     parser.add_argument("--finetune", help="fine tune", action="store_true")
     parser.add_argument("--pretrainFile", help="checkpoint location", type=str, default=None)
+    parser.add_argument('--resume', help='resume from checkpoint', action="store_true")
+    parser.add_argument("--resumeCheckpoint", help="checkpoint location", type=str, default=None)
 
     parser.add_argument("--oodMethod", help="ood method", type=str, default="abs",
                         choices=['abs', 'energy', 'entropy'])
@@ -580,7 +605,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     args.num_cluster = min(args.num_cluster, args.batch_size)
-    assert args.imagenetNumberOfClasses <= 500
+    assert args.imagenetNumberOfClasses <= 100
 
     # if args.id == "imagenet":
     #     args.size_candidate_ood = 1000 * args.imagenetNumberOfClasses

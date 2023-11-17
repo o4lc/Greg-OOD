@@ -78,6 +78,7 @@ class Wide_ResNet(nn.Module):
 
         # multi classification head
         self.linear = nn.Linear(nStages[3], num_classes)
+        self.avgPool = nn.AdaptiveAvgPool2d((1, 1))
 
         self.feature_dim = self.linear.in_features
         self.pool_size = in_size // 4
@@ -98,7 +99,7 @@ class Wide_ResNet(nn.Module):
         out = self.layer2(out)
         out = self.layer3(out)
         out = F.relu(self.bn1(out))
-        out = F.avg_pool2d(out, self.pool_size)
+        out = self.avgPool(out)
         out = out.view(out.size(0), -1)
         logit = self.linear(out)
         

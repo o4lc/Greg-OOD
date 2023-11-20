@@ -584,7 +584,7 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='tuning')
     parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40_2',
                                                                             'wrn40_4', "resnet50", 'resnet101',
-                                                                            "resnet18"])
+                                                                            "resnet18", 'densenet121'])
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--scheduler', type=str, default='multistep', choices=['lambda', 'multistep'])

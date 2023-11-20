@@ -80,6 +80,108 @@ def test(data_loader, clf, num_classes):
 def cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
 
+
+def clusterAndChooseSamples(clf, data_batch_candidate_ood, num_classes, spt, ept, batch_size_sampled_ood, onGpu, args):
+    # data_batch_candidate_ood = sample_ood['data']
+    # print("Calculating features")
+    with torch.no_grad():
+        if onGpu:
+            logits_batch_candidate_ood, feats_batch_candidate_ood = clf.module.forward(
+                data_batch_candidate_ood, ret_feat=True)
+        else:
+            logits_batch_candidate_ood, feats_batch_candidate_ood = clf.forward(
+                data_batch_candidate_ood, ret_feat=True)
+    # print(logits_batch_candidate_ood.shape)
+    # pdb.set_trace()
+    # prob_id = torch.softmax(logits_batch_id, dim=1)
+
+    # keep the N proximal points with small OOD-ness
+    if args.oodMethod == "abs":
+        prob_ood = torch.softmax(logits_batch_candidate_ood, dim=1)
+        weights_batch_candidate_ood = np.array(prob_ood[:, -1].tolist())
+    elif args.oodMethod == "energy":
+        energies = -torch.logsumexp(logits_batch_candidate_ood, dim=1)
+        weights_batch_candidate_ood = np.array(energies.tolist())
+    elif args.oodMethod == "entropy":
+        posits = torch.softmax(logits_batch_candidate_ood, dim=1)
+        entropies = calculateEntropy(posits, num_classes)
+        weights_batch_candidate_ood = np.array(entropies.tolist())
+    else:
+        raise NotImplementedError
+    idxs_sorted = np.argsort(weights_batch_candidate_ood)
+    # print("Sorting ...")
+    weights_batch_proximial_ood = weights_batch_candidate_ood[list(idxs_sorted[spt:ept])]
+
+    # diff representations: latent embedding, normalized latent embedding, output prob
+    if args.repr == 'latent':
+        feats_batch_candidate_ood = np.array(feats_batch_candidate_ood.cpu())
+        feats_batch_proximial_ood = feats_batch_candidate_ood[list(idxs_sorted[spt:ept])]
+        repr_batch_proximial_ood = feats_batch_proximial_ood
+    elif args.repr == 'norm':
+        repr_batch_proximial_ood = np.array(F.normalize(feats_batch_candidate_ood.cpu(), dim=-1))[
+            list(idxs_sorted[spt:ept])]
+    elif args.repr == 'normBatch':
+        repr_batch_proximial_ood \
+            = (feats_batch_candidate_ood / torch.linalg.norm(feats_batch_candidate_ood, dim=1).mean())[
+            list(idxs_sorted[spt:ept])].cpu().numpy()
+    elif args.repr == 'normFeature':
+        repr_batch_proximial_ood = np.array(F.normalize(feats_batch_candidate_ood.cpu(), dim=0))[
+            list(idxs_sorted[spt:ept])]
+    elif args.repr == 'output':
+        repr_batch_proximial_ood = np.array(torch.softmax(logits_batch_candidate_ood[:, :-1], dim=1).tolist())[
+            list(idxs_sorted[spt:ept])]
+    elif args.repr == 'pca':
+        feats_batch_candidate_ood = np.array(feats_batch_candidate_ood.cpu())
+        feats_batch_proximial_ood = feats_batch_candidate_ood[list(idxs_sorted[spt:ept])]
+        pca = PCA(n_components=args.mc)
+        repr_batch_proximial_ood = pca.fit_transform(feats_batch_proximial_ood)
+        print(pca.explained_variance_ratio_[:10])
+    elif args.repr == 'np':
+        repr_batch_proximial_ood = np.array(F.normalize(feats_batch_candidate_ood.cpu(), dim=-1))[
+            list(idxs_sorted[spt:ept])]
+        pca = PCA(n_components=args.mc)
+        repr_batch_proximial_ood = pca.fit_transform(repr_batch_proximial_ood)
+        print(pca.explained_variance_ratio_[:10])
+
+    # clustering the N proximial points into K clusters with KMeans algorithm
+    k = args.num_cluster
+    # print("Clustering ...")
+    kmeans = KMeans(n_clusters=args.num_cluster, n_init=args.n_init).fit(repr_batch_proximial_ood)
+
+    clus_proximial_ood = kmeans.labels_
+
+    idxs_sampled = []
+    # print("Sampling ...")
+    # --- kmeans - sub-cluster ---
+    if k > batch_size_sampled_ood:
+        sampled_cluster_size = 1
+    else:
+        sampled_cluster_size = int(batch_size_sampled_ood / k)
+
+    for i in range(min(k, batch_size_sampled_ood)):
+
+        valid_idxs = np.where(clus_proximial_ood == i)[0]
+
+        if len(valid_idxs) <= sampled_cluster_size:
+            idxs_sampled.extend(idxs_sorted[spt:][valid_idxs])
+        else:
+            idxs_valid_sorted = np.argsort(weights_batch_proximial_ood[valid_idxs])
+            toAdd = idxs_sorted[spt:][valid_idxs[idxs_valid_sorted[:sampled_cluster_size]]]
+            if args.sampleTwoWay:
+                toAdd2 = idxs_sorted[spt:][valid_idxs[idxs_valid_sorted[-sampled_cluster_size:]]]
+                toAdd = np.unique(np.concatenate([toAdd, toAdd2]))
+
+            idxs_sampled.extend(toAdd)
+
+    finalBatchSize = batch_size_sampled_ood * (2 if args.sampleTwoWay else 1)
+    # fill the empty: remove the already sampled, then randomly complete the sampled
+    if finalBatchSize > len(idxs_sampled):
+        idxs_sampled.extend(
+            random.sample(list(set(idxs_sorted[spt:ept]) - set(idxs_sampled)), k=finalBatchSize - len(idxs_sampled)))
+    # indices_sampled_ood = indices_candidate_ood[idxs_sampled]
+    # pdb.set_trace()
+    return data_batch_candidate_ood[idxs_sampled]
+
 def main(args):
     device = torch.device("cpu")
     wandb.init(project="DOS-OOD", entity="limitlessinfinite", config=args)
@@ -149,13 +251,7 @@ def main(args):
                                    num_workers=args.prefetch, pin_memory=True)
         validationEnergies = []
         bestValidationEnergy = -float("inf")
-    # the candidate ood idxs
-    indices_candidate_ood_epochs = []
 
-    args.size_candidate_ood = min(args.size_candidate_ood, len(train_set_all_ood))
-    for i in range(args.epochs):
-        indices_epoch = np.array(random.sample(range(len(train_set_all_ood)), args.size_candidate_ood))
-        indices_candidate_ood_epochs.append(indices_epoch)
 
     print('>>> ID: {} - OOD: {}'.format(args.id, args.ood))
     if args.id == "cifar10":
@@ -196,8 +292,8 @@ def main(args):
         lr_stones = [args.singleLrStone]
     else:
         lr_stones = [int(args.epochs * float(lr_stone)) for lr_stone in args.lr_stones]
-    optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
-    
+    # optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
+    optimizer = torch.optim.Adam(clf.parameters(), lr=args.lr)
     # print('Scheduler: MultiStepLR - LMS: {}'.format(args.lr_stones))
     # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_stones, gamma=0.1)
     
@@ -237,11 +333,26 @@ def main(args):
         start_epoch = 1
         cla_acc = 0.0
     begin_time = time.time()
-    batch_size_candidate_ood = int(args.size_candidate_ood / len(train_set_id) * args.batch_size)
-    batch_size_sampled_ood = int(args.size_factor_sampled_ood * args.batch_size)
-    # print(batch_size_candidate_ood, batch_size_sampled_ood, args.size_candidate_ood, len(train_set_id))
-    spt, ept = args.spt, args.ept
 
+    # the candidate ood idxs
+    indices_candidate_ood_epochs = []
+
+    if args.noCluster:
+        spt=0
+        ept=100000
+        batch_size_sampled_ood = int(args.size_factor_sampled_ood * args.batch_size)
+        batch_size_candidate_ood = batch_size_sampled_ood
+        args.size_candidate_ood = batch_size_candidate_ood * len(train_loader_id)
+    else:
+        args.size_candidate_ood = min(args.size_candidate_ood, len(train_set_all_ood))
+
+        batch_size_candidate_ood = int(args.size_candidate_ood / len(train_set_id) * args.batch_size)
+        batch_size_sampled_ood = int(args.size_factor_sampled_ood * args.batch_size)
+        # print(batch_size_candidate_ood, batch_size_sampled_ood, args.size_candidate_ood, len(train_set_id))
+        spt, ept = args.spt, args.ept
+    for i in range(args.epochs):
+        indices_epoch = np.array(random.sample(range(len(train_set_all_ood)), args.size_candidate_ood))
+        indices_candidate_ood_epochs.append(indices_epoch)
 
 
     for epoch in range(start_epoch, args.epochs+1):
@@ -268,100 +379,11 @@ def main(args):
                 data_batch_candidate_ood = data_batch_candidate_ood.cuda()
             clf.eval()
 
-            # data_batch_candidate_ood = sample_ood['data']
-            # print("Calculating features")
-            with torch.no_grad():
-                if onGpu:
-                    logits_batch_candidate_ood, feats_batch_candidate_ood = clf.module.forward(
-                        data_batch_candidate_ood, ret_feat=True)
-                else:
-                    logits_batch_candidate_ood, feats_batch_candidate_ood = clf.forward(
-                        data_batch_candidate_ood, ret_feat=True)
-            # print(logits_batch_candidate_ood.shape)
-            # pdb.set_trace()
-            # prob_id = torch.softmax(logits_batch_id, dim=1)
-
-            # keep the N proximal points with small OOD-ness
-            if args.oodMethod == "abs":
-                prob_ood = torch.softmax(logits_batch_candidate_ood, dim=1)
-                weights_batch_candidate_ood = np.array(prob_ood[:, -1].tolist())
-            elif args.oodMethod == "energy":
-                energies = -torch.logsumexp(logits_batch_candidate_ood, dim=1)
-                weights_batch_candidate_ood = np.array(energies.tolist())
-            elif args.oodMethod == "entropy":
-                posits = torch.softmax(logits_batch_candidate_ood, dim=1)
-                entropies = calculateEntropy(posits, num_classes)
-                weights_batch_candidate_ood = np.array(entropies.tolist())
+            if args.noCluster:
+                data_ood = data_batch_candidate_ood
             else:
-                raise NotImplementedError
-            idxs_sorted = np.argsort(weights_batch_candidate_ood)
-            # print("Sorting ...")
-            weights_batch_proximial_ood = weights_batch_candidate_ood[list(idxs_sorted[spt:ept])]
-
-            # diff representations: latent embedding, normalized latent embedding, output prob
-            if args.repr == 'latent':
-                feats_batch_candidate_ood = np.array(feats_batch_candidate_ood.cpu())
-                feats_batch_proximial_ood = feats_batch_candidate_ood[list(idxs_sorted[spt:ept])]
-                repr_batch_proximial_ood = feats_batch_proximial_ood
-            elif args.repr == 'norm':
-                repr_batch_proximial_ood = np.array(F.normalize(feats_batch_candidate_ood.cpu(), dim=-1))[list(idxs_sorted[spt:ept])]
-            elif args.repr == 'normBatch':
-                repr_batch_proximial_ood \
-                    = (feats_batch_candidate_ood / torch.linalg.norm(feats_batch_candidate_ood, dim=1).mean())[list(idxs_sorted[spt:ept])].cpu().numpy()
-            elif args.repr == 'normFeature':
-                repr_batch_proximial_ood = np.array(F.normalize(feats_batch_candidate_ood.cpu(), dim=0))[list(idxs_sorted[spt:ept])]
-            elif args.repr == 'output':
-                repr_batch_proximial_ood = np.array(torch.softmax(logits_batch_candidate_ood[:, :-1], dim=1).tolist())[list(idxs_sorted[spt:ept])]
-            elif args.repr == 'pca':
-                feats_batch_candidate_ood = np.array(feats_batch_candidate_ood.cpu())
-                feats_batch_proximial_ood = feats_batch_candidate_ood[list(idxs_sorted[spt:ept])]
-                pca = PCA(n_components=args.mc)
-                repr_batch_proximial_ood = pca.fit_transform(feats_batch_proximial_ood)
-                print(pca.explained_variance_ratio_[:10])
-            elif args.repr == 'np':
-                repr_batch_proximial_ood = np.array(F.normalize(feats_batch_candidate_ood.cpu(), dim=-1))[list(idxs_sorted[spt:ept])]
-                pca = PCA(n_components=args.mc)
-                repr_batch_proximial_ood = pca.fit_transform(repr_batch_proximial_ood)
-                print(pca.explained_variance_ratio_[:10])
-
-            # clustering the N proximial points into K clusters with KMeans algorithm
-            k = args.num_cluster
-            # print("Clustering ...")
-            kmeans = KMeans(n_clusters=args.num_cluster, n_init=args.n_init).fit(repr_batch_proximial_ood)
-
-            clus_proximial_ood = kmeans.labels_
-
-            idxs_sampled = []
-            # print("Sampling ...")
-            # --- kmeans - sub-cluster ---
-            if k > batch_size_sampled_ood:
-                sampled_cluster_size = 1
-            else:
-                sampled_cluster_size = int(batch_size_sampled_ood / k)
-
-            for i in range(min(k, batch_size_sampled_ood)):
-
-                valid_idxs = np.where(clus_proximial_ood == i)[0]
-                
-                if len(valid_idxs) <= sampled_cluster_size:
-                    idxs_sampled.extend(idxs_sorted[spt:][valid_idxs])
-                else:
-                    idxs_valid_sorted = np.argsort(weights_batch_proximial_ood[valid_idxs])
-                    toAdd = idxs_sorted[spt:][valid_idxs[idxs_valid_sorted[:sampled_cluster_size]]]
-                    if args.sampleTwoWay:
-                        toAdd2 = idxs_sorted[spt:][valid_idxs[idxs_valid_sorted[-sampled_cluster_size:]]]
-                        toAdd = np.unique(np.concatenate([toAdd, toAdd2]))
-
-
-                    idxs_sampled.extend(toAdd)
-
-            finalBatchSize = batch_size_sampled_ood * (2 if args.sampleTwoWay else 1)
-            # fill the empty: remove the already sampled, then randomly complete the sampled
-            if finalBatchSize > len(idxs_sampled):
-                idxs_sampled.extend(random.sample(list(set(idxs_sorted[spt:ept]) - set(idxs_sampled)), k=finalBatchSize - len(idxs_sampled)))
-            # indices_sampled_ood = indices_candidate_ood[idxs_sampled]
-            # pdb.set_trace()
-            data_ood = data_batch_candidate_ood[idxs_sampled]
+                data_ood = clusterAndChooseSamples(clf, data_batch_candidate_ood, num_classes, spt, ept,
+                                                   batch_size_sampled_ood, onGpu, args)
 
             # greedy_count += len(set(idxs_sampled) & set(idxs_sorted[:batch_size_sampled_ood]))
             # calculate metric and visulization
@@ -601,6 +623,8 @@ if __name__ == '__main__':
                         action="store_true")
     parser.add_argument('--imagenetNumberOfClasses', type=int, default=100)
     parser.add_argument('--earlyStopping', help='Early stopping', action="store_true")
+
+    parser.add_argument('--noCluster', help='No clustering', action="store_true")
 
     args = parser.parse_args()
 

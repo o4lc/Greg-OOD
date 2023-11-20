@@ -2,6 +2,7 @@ from .wide_resnet import Wide_ResNet, weights_init
 from .wide_resnet_pretrain import WideResNet
 from .densenet import DenseNet3
 from .resnet import *
+from .densenetLargeScale import densenet121
 
 
 def get_clf(name, num_classes=10):
@@ -14,6 +15,8 @@ def get_clf(name, num_classes=10):
         clf = DenseNet3(depth=100, num_classes=num_classes, growth_rate=12, reduction=0.5, bottleneck=True, dropRate=0.0)
     elif name in ['resnet18', 'resnet50']:
         clf = resnet(name, num_classes)
+    elif name == "densenet121":
+        clf = densenet121(num_classes=num_classes)
     # elif name.startswith("resnet"):
     #     clf = MyResNet(name, num_classes)
     else:

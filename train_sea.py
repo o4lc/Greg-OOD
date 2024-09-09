@@ -32,12 +32,6 @@ from datasets.imagenetUtil import *
 from tqdm import tqdm
 
 
-def calculateEntropy(posits, numberOfClasses):
-    '''
-    :param posits:  tensor with shape (numberOfSamples, numberOfClasses)
-    :return: entropy with shape (numberOfSamples,)
-    '''
-    return -(posits * torch.log(posits + 1e-8)).sum(axis=1) / np.log(numberOfClasses)
 def init_seeds(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -102,10 +96,6 @@ def clusterAndChooseSamples(clf, data_batch_candidate_ood, num_classes, spt, ept
     elif args.oodMethod == "energy":
         energies = -torch.logsumexp(logits_batch_candidate_ood, dim=1)
         weights_batch_candidate_ood = np.array(energies.tolist())
-    elif args.oodMethod == "entropy":
-        posits = torch.softmax(logits_batch_candidate_ood, dim=1)
-        entropies = calculateEntropy(posits, num_classes)
-        weights_batch_candidate_ood = np.array(entropies.tolist())
     else:
         raise NotImplementedError
     idxs_sorted = np.argsort(weights_batch_candidate_ood)
@@ -183,7 +173,6 @@ def clusterAndChooseSamples(clf, data_batch_candidate_ood, num_classes, spt, ept
     return data_batch_candidate_ood[idxs_sampled]
 
 def main(args):
-    device = torch.device("cpu")
     wandb.init(project="DOS-OOD", entity="limitlessinfinite", config=args)
     timeIdentifier = datetime.datetime.now().strftime("%Y-%m-%d-%H:%M")
     init_seeds(args.seed)
@@ -193,7 +182,7 @@ def main(args):
     elif args.repr == 'np':
         exp_path = Path(args.output_dir) / ('s' + str(args.seed)) / (args.id  + '-' + args.ood) / '-'.join([args.arch, args.oodMethod, args.scheduler, 'b_'+str(args.beta), 'spt_' + str(args.spt), 'ept_'+str(args.ept), 'bs_'+str(args.batch_size), 'seag_k_'+str(args.num_cluster), 'np', 'mc_'+str(args.mc), 'n_'+str(args.n_init), 'jac', str(args.jacobianLoss), timeIdentifier])
     else:
-        exp_path = Path(args.output_dir) / ('s' + str(args.seed)) / (args.id  + '-' + args.ood) / '-'.join([args.arch, args.oodMethod, args.scheduler, 'b_'+str(args.beta), 'spt_' + str(args.spt), 'ept_'+str(args.ept), 'bs_'+str(args.batch_size), 'seag_k_'+str(args.num_cluster), args.repr, 'n_'+str(args.n_init), 'jac', str(args.jacobianLoss), timeIdentifier])
+        exp_path = Path(args.output_dir) / ('s' + str(args.seed)) / (args.id  + '-' + args.ood) / '-'.join([args.arch, args.oodMethod, args.scheduler, 'b_'+str(args.beta), 'spt_' + str(args.spt), 'ept_'+str(args.ept), 'bs_'+str(args.batch_size), 'seag_k_'+str(args.num_cluster), args.repr, 'n_'+str(args.n_init), 'jac', str(args.jacobianLoss), timeIdentifier, args.name])
 
     exp_path.mkdir(parents=True, exist_ok=True)
 
@@ -226,7 +215,6 @@ def main(args):
         # Note that the current implementation of the imagenet dataset is not suited for calculating accuracy. This
         # is due to the fact that we only use a subset of the classes of the imagenet dataset and as a result, the
         # numbering of the classes and target truths gets messed up.
-        # @TODO: Fix this issue
         num_classes = args.imagenetNumberOfClasses
         _, _, _, _, _, train_set_id, \
             test_set_id, _, train_set_all_ood = setup_imagenet(num_classes, rootPath="../data/imageNet")
@@ -239,19 +227,6 @@ def main(args):
                                  num_workers=args.prefetch, pin_memory=True, drop_last=True)
     test_loader_id = DataLoader(test_set_id, batch_size=args.batch_size, shuffle=False,
                                 num_workers=args.prefetch, pin_memory=True)
-
-    if args.oodMethod == "energy":
-        trainValSplit = 0.97
-        lengths = [int(trainValSplit * len(train_set_all_ood))]
-        lengths.append(len(train_set_all_ood) - lengths[0])
-        train_set_all_ood, val_set_ood =\
-            torch.utils.data.random_split(train_set_all_ood, lengths)
-        print(len(train_set_all_ood), len(val_set_ood))
-        valDataLoader = DataLoader(val_set_ood, batch_size=args.batch_size, shuffle=True,
-                                   num_workers=args.prefetch, pin_memory=True)
-        validationEnergies = []
-        bestValidationEnergy = -float("inf")
-
 
     print('>>> ID: {} - OOD: {}'.format(args.id, args.ood))
     if args.id == "cifar10":
@@ -292,8 +267,16 @@ def main(args):
         lr_stones = [args.singleLrStone]
     else:
         lr_stones = [int(args.epochs * float(lr_stone)) for lr_stone in args.lr_stones]
+
+    if args.id == "imagenet":
+        optimizer = torch.optim.Adam(clf.parameters(), lr=args.lr)
+    else:
+        if args.noCluster:
+            optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
+        else:
+            optimizer = torch.optim.Adam(clf.parameters(), lr=args.lr)
     # optimizer = torch.optim.SGD(clf.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum, nesterov=True)
-    optimizer = torch.optim.Adam(clf.parameters(), lr=args.lr)
+    # optimizer = torch.optim.Adam(clf.parameters(), lr=args.lr)
     # print('Scheduler: MultiStepLR - LMS: {}'.format(args.lr_stones))
     # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_stones, gamma=0.1)
     
@@ -419,22 +402,9 @@ def main(args):
                     energyOutRecalculated = -torch.logsumexp(recalculatedLogits[num_id:], 1)
                     return (-(F.relu(args.m_in - energyInRecalculated)).mean()
                             + (F.relu(energyOutRecalculated - args.m_out)).mean())
-                elif args.oodMethod == "entropy":
-                    recalculatedLogits = clf(inputs)
-                    recalculatedPosits = torch.softmax(recalculatedLogits, dim=1)
-                    recalculatedEntropies = calculateEntropy(recalculatedPosits, num_classes)
-                    entropyInRecalculated = recalculatedEntropies[:num_id]
-                    entropyOutRecalculated = recalculatedEntropies[num_id:]
-                    return (-(F.relu(args.m_in - entropyInRecalculated)).mean()
-                     + (F.relu(entropyOutRecalculated - args.m_out)).mean())
-
-
                 else:
                     raise NotImplementedError
             # forward
-
-
-
 
             logit = clf(data)
             ceInd = F.cross_entropy(logit[:num_id], target_id)
@@ -453,15 +423,6 @@ def main(args):
                                           + torch.pow(F.relu(args.m_out - energyOut), 2).mean())
                 loss += energyLoss
                 wandb.log({'Energy Loss': energyLoss.item()})
-            elif args.oodMethod == "entropy":
-                posit = torch.softmax(logit, dim=1)
-                entropies = calculateEntropy(posit, num_classes)
-                entropyIn = entropies[:num_id]
-                entropyOut = entropies[num_id:]
-                entropyLoss = args.beta * (torch.pow(F.relu(entropyIn - args.m_in), 2).mean()
-                                           + torch.pow(F.relu(args.m_out - entropyOut), 2).mean())
-                loss += entropyLoss
-                wandb.log({'Entropy Loss': entropyLoss.item()})
 
             if args.jacobianLoss:
                 jacLoss = torch.autograd.functional.jacobian(jacobianLossFunction, data, True)
@@ -473,8 +434,6 @@ def main(args):
                 jacLoss = jacLoss.reshape(jacLoss.shape[0], -1)
                 jacLoss = torch.linalg.norm(jacLoss, 2, 1).mean()
             wandb.log({"Total loss": loss.item(), 'Jacobian Loss': jacLoss.item()})
-
-
 
             # backward
             optimizer.zero_grad()
@@ -496,8 +455,6 @@ def main(args):
                 correct += pred.eq(target_id).sum().item()
                 total += num_id
 
-
-
         if args.scheduler == 'multistep':
             scheduler.step()
         
@@ -506,41 +463,6 @@ def main(args):
         
         # average on sample
         print('[cla loss: {:.8f} | cla acc: {:.4f}%]'.format(total_loss / len(train_loader_id), 100. * correct / total))
-
-        # --------------------------------------------------------------------- #
-        if args.oodMethod == "energy":
-            print("Validating ...")
-            clf.eval()
-            energies = []
-            with torch.no_grad():
-                for x in tqdm(valDataLoader):
-                    if args.id == "imagenet":
-                        x = x[0]
-                    else:
-                        x = x['data']
-                    logit = clf(x)
-                    energy = -torch.logsumexp(logit, 1)
-                    energies.append(energy.cpu().numpy())
-                energies = np.concatenate(energies)
-                validationEnergy = np.mean(energies)
-                validationEnergies.append(validationEnergy)
-                wandb.log({"Validation Energy": validationEnergy})
-                if validationEnergy > bestValidationEnergy:
-                    bestValidationEnergy = validationEnergy
-                    torch.save({'state_dict': clf.module.state_dict()}, str(exp_path / 'bestLoss.pth'))
-
-                if len(validationEnergies) > 50 and (np.mean(validationEnergies[-5:]) < np.mean(validationEnergies[-10:-5])):
-                    print("Early Stopping Condition Met")
-                    wandb.log({"Early Stopping Condition": 1})
-                    if args.earlyStopping:
-                        break
-                else:
-                    wandb.log({"Early Stopping Condition": 0})
-
-
-
-
-
 
         val_metrics = test(test_loader_id, clf, num_classes)
         cla_acc = val_metrics['cla_acc']
@@ -584,7 +506,8 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', help='dir to store experiment artifacts', default='tuning')
     parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40_2',
                                                                             'wrn40_4', "resnet50", 'resnet101',
-                                                                            "resnet18", 'densenet121'])
+                                                                            "resnet18", 'densenet121',
+                                                                            'resnet18_32x32'])
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.0001)
     parser.add_argument('--scheduler', type=str, default='multistep', choices=['lambda', 'multistep'])
@@ -612,7 +535,7 @@ if __name__ == '__main__':
     parser.add_argument("--resumeCheckpoint", help="checkpoint location", type=str, default=None)
 
     parser.add_argument("--oodMethod", help="ood method", type=str, default="abs",
-                        choices=['abs', 'energy', 'entropy'])
+                        choices=['abs', 'energy'])
     parser.add_argument('--jacobianLoss', help='add jacobian loss', type=float, default=0)
     parser.add_argument("--primalDual", help="use primal dual", action="store_true")
     parser.add_argument('--m_in', type=float, default=-25.,
@@ -622,16 +545,13 @@ if __name__ == '__main__':
     parser.add_argument('--sampleTwoWay', help='Sample both the worst and best points from each cluster',
                         action="store_true")
     parser.add_argument('--imagenetNumberOfClasses', type=int, default=100)
-    parser.add_argument('--earlyStopping', help='Early stopping', action="store_true")
 
     parser.add_argument('--noCluster', help='No clustering', action="store_true")
+    parser.add_argument("--name", help="name of the experiment", type=str, default="")
 
     args = parser.parse_args()
 
     args.num_cluster = min(args.num_cluster, args.batch_size)
     assert args.imagenetNumberOfClasses <= 100
 
-    # if args.id == "imagenet":
-    #     args.size_candidate_ood = 1000 * args.imagenetNumberOfClasses
-    # assert args.size_candidate_ood
     main(args)

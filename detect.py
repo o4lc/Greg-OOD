@@ -710,7 +710,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=200)
     parser.add_argument('--prefetch', type=int, default=10)
     parser.add_argument('--arch', type=str, default='densenet101', choices=['densenet101', 'wrn40_2',
-                                                                            'wrn40_4', 'resnet50', 'resnet101', 'resnet18'])
+                                                                            'wrn40_4', 'resnet50', 'resnet101', 'resnet18',
+                                                                            'densenet121', 'resnet18_32x32'])
     parser.add_argument('--pretrain', type=str, default=None, help='path to pre-trained model')
     parser.add_argument('--fig_name', type=str, default='test.png')
     parser.add_argument('--gpu_idx', type=int, default=0)

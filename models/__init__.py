@@ -3,6 +3,7 @@ from .wide_resnet_pretrain import WideResNet
 from .densenet import DenseNet3
 from .resnet import *
 from .densenetLargeScale import densenet121
+from .resnet18_32x32 import ResNet18_32x32
 
 
 def get_clf(name, num_classes=10):
@@ -19,6 +20,8 @@ def get_clf(name, num_classes=10):
         clf = densenet121(num_classes=num_classes)
     # elif name.startswith("resnet"):
     #     clf = MyResNet(name, num_classes)
+    elif name == "resnet18_32x32":
+        clf = ResNet18_32x32(num_classes=num_classes)
     else:
         raise RuntimeError('---> Invalid CLF name {}'.format(name))
     
